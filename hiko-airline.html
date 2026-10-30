@@ -350,6 +350,15 @@ button.ring { border: 0; padding: 0; cursor: pointer; color: inherit; }
 .savep-row { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
 .savep .sub { margin: 0; }
 
+.pill.clock b { font-family: var(--mono); color: var(--amber); }
+.cd-days { display: grid; grid-template-columns: repeat(7, 1fr); gap: 6px; align-items: end; height: 112px; }
+.cd-day { display: grid; grid-template-rows: auto 1fr auto; gap: 3px; height: 100%; text-align: center; min-width: 0; }
+.cd-day b { font: 600 9px var(--mono); color: var(--mute); overflow: hidden; }
+.cd-day i { display: flex; align-items: flex-end; background: var(--edge); border-radius: 4px; overflow: hidden; }
+.cd-day u { display: block; width: 100%; background: #4fd1ff; border-radius: 4px 4px 0 0; }
+.cd-day.now u { background: var(--amber); }
+.cd-day small { font-size: 10px; color: var(--mute); }
+
 </style>
 <div id="root"></div>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.3.1/umd/react.production.min.js"></script>
@@ -664,9 +673,25 @@ const ENG = (() => {
   }
 
   // ---------- 状態生成・保存 ----------
+  const DAY_START = 6 * 3600;                       // ゲーム開始は 1日目 6:00
+  const dayOf = (g) => Math.floor(g.gt / 86400) + 1;
+  function clockText(g) {                           // 例: 「3日目 17:17」
+    const s = Math.floor(g.gt % 86400), z = (n) => String(n).padStart(2, '0');
+    return dayOf(g) + '日目 ' + z(Math.floor(s / 3600)) + ':' + z(Math.floor((s % 3600) / 60));
+  }
+  function tickClock(g, realSecs) {                 // 実秒 → ゲーム内時間。日をまたいだら日別収益に確定
+    g.gt += realSecs * TS;
+    const nd = dayOf(g);
+    if (nd > g.hDay) {
+      const n = nd - g.hDay, per = g.dayNet / n;      // 離席中などで複数日進んだ分は均等に配分
+      for (let i = 0; i < n; i++) g.hist.push(per);
+      if (g.hist.length > 14) g.hist = g.hist.slice(-14);
+      g.dayNet = 0; g.hDay = nd;
+    }
+  }
   function newGame() {
     const g = { v: 4, name: 'スカイウィング航空', money: 100000, miles: 0, xp: 0, level: 1, regions: CORE.START_REGIONS.slice(), seen: ['ITM', 'TJH'], quizAt: 0, quizBest: 0, apLv: {}, coupon: 0,
-      planes: [], routes: [], nextId: 1, speed: 1, autoMaint: true, lastSeen: Date.now(), legs: 0, earned: 0, hint: true };
+      planes: [], routes: [], nextId: 1, speed: 1, autoMaint: true, lastSeen: Date.now(), legs: 0, earned: 0, hint: true, gt: DAY_START, hDay: 1, hist: [], dayNet: 0 };
     const p = { id: g.nextId++, type: 't01a', route: null, leg: 0, phase: 'gnd', t: 0, cond: 100, profit: 0 };
     g.planes.push(p);
     const r = { id: g.nextId++, stops: ['ITM', 'TJH'], mode: 1 };
@@ -685,6 +710,10 @@ const ENG = (() => {
       g.planes = g.planes.filter((p) => TYPE[p.type]);
       g.routes = g.routes.filter((r) => r.stops.every((s) => AP[s]));
       for (const p of g.planes) if (p.route && !routeById(g, p.route)) p.route = null;
+      if (typeof g.gt !== 'number') g.gt = DAY_START;      // 旧セーブにゲーム内時計を補う
+      g.hDay = typeof g.hDay === 'number' ? g.hDay : dayOf(g);
+      if (!Array.isArray(g.hist)) g.hist = [];
+      if (typeof g.dayNet !== 'number') g.dayNet = 0;
       return g;
     } catch (e) { return null; }
   }
@@ -726,7 +755,7 @@ const ENG = (() => {
     const n = r.stops.length;
     const a = AP[r.stops[p.leg]], b = AP[r.stops[(p.leg + 1) % n]];
     const e = leg(TYPE[p.type], a, b, r.mode, p.cond, hubBonus(g, a, b));
-    g.money += e.net; g.earned += e.net; p.profit += e.net; g.legs++;
+    g.dayNet = (g.dayNet || 0) + e.net; g.money += e.net; g.earned += e.net; p.profit += e.net; g.legs++;
     g.pax = (g.pax || 0) + TYPE[p.type].seats * e.lf;
     if (RT.acc) { const q = RT.acc[r.id] || (RT.acc[r.id] = { net: 0, legs: 0 }); q.net += e.net; q.legs++; }
     g.miles += milesPerLeg(e.d);
@@ -758,6 +787,7 @@ const ENG = (() => {
   function advance(dt) {                          // ゲーム内の経過(速度倍率は呼び出し側で掛ける)
     const g = S.g;
     for (const p of g.planes) if (p.route) stepPlane(g, p, dt, true);
+    tickClock(g, dt);
   }
   function catchUp(secs) {                        // 画面を離れていた間の収益(常に1倍速、上限8時間)
     const g = S.g;
@@ -765,6 +795,7 @@ const ENG = (() => {
     const b = { money: g.money, legs: g.legs, miles: g.miles, level: g.level, pax: g.pax || 0 };
     RT.acc = {};
     for (const p of g.planes) if (p.route) stepPlane(g, p, s, false);
+    tickClock(g, s);
     const rows = Object.entries(RT.acc).map(([id, q]) => { const r = routeById(g, +id); return r ? { label: r.stops.length === 2 ? r.stops.join('→') : r.stops.join('→'), net: q.net, legs: q.legs } : null; }).filter(Boolean).sort((a, b) => b.net - a.net);
     RT.acc = null;
     return { rows, secs: s, capped: secs > OFFLINE_CAP, earned: g.money - b.money, legs: g.legs - b.legs, pax: Math.round((g.pax || 0) - b.pax), miles: g.miles - b.miles, levels: g.level - b.level };
@@ -946,7 +977,7 @@ const ENG = (() => {
 
   return { canUnlock, NEIGHBORS: CORE.NEIGHBORS, LV, KIND_LABEL, apLevel, upgradeCost, upgradeAirport, routeCheck, routeTierMax, planeFit, typeFit, buyForRoute, learnDiscount, makeQuiz, claimQuiz, quizWait, dexOf, JP_AREAS, PREF_AREA, QUIZ_COOLDOWN, cheapestFor, S, RT, AP, TYPE, REGION, countryName, placeOf, regionCount, searchAirports, mercY, fmt, fmtInt, fmtKm, toast, setBump, routeById, routeLegs, routeMaxLeg, routeTotal, routeLabel,
     hubCount, hubBonus, maxRoutes, planesOn, planeRate, totalRate, modeNets, recommendMode, repairCost, sellValue,
-    save, exportSave, importSave, resetGame, advance, catchUp, buyPlane, sellPlane, assignPlane, createRoute, deleteRoute, setMode,
+    clockText, dayOf, save, exportSave, importSave, resetGame, advance, catchUp, buyPlane, sellPlane, assignPlane, createRoute, deleteRoute, setMode,
     repairNow, repairAll, unlockRegion, setSpeed, init, OFFLINE_CAP };
 })();
 
@@ -1552,11 +1583,19 @@ function CompanyModal({ g, onClose }) {
         h('div', null,
           h('h2', null, g.name),
           h('p', { className: 'sub' }, '次のレベルまで ' + fmtInt(Math.max(0, Math.ceil(hi - g.xp))) + ' XP'),
+          h('p', { className: 'sub mono' }, '⏱ ' + ENG.clockText(g)),
           h('p', { className: 'cd-rate ' + (rate < 0 ? 'neg' : '') }, fmt(rate), h('small', null, ' /分')))),
       h('div', { className: 'cd-money' }, h('small', null, '資金'), h('b', null, fmt(g.money)), h('small', null, '累計収益 ' + fmt(g.earned || 0))),
       h('div', { className: 'cd-stats' },
         stat('機体', g.planes.length), stat('路線', g.routes.length), stat('飛行回数', fmtInt(g.legs)),
         stat('搭乗者', fmtInt(Math.round(g.pax || 0))), stat('マイル', fmtInt(g.miles)), stat('就航エリア', g.regions.length + '/' + REGIONS.length)),
+      h('h3', { className: 'cd-h' }, '日別の収益(ゲーム内1日 = 実時間12分)'),
+      h('div', { className: 'cd-days' }, (() => {
+        const days = g.hist.slice(-6).concat([g.dayNet || 0]), mx = Math.max(1, ...days.map((v) => Math.max(0, v)));
+        return days.map((v, i) => h('div', { key: i, className: 'cd-day' + (i === days.length - 1 ? ' now' : '') },
+          h('b', null, fmt(v)), h('i', null, h('u', { style: { height: Math.max(3, Math.max(0, v) / mx * 100) + '%' } })),
+          h('small', null, i === days.length - 1 ? '今日' : (ENG.dayOf(g) - (days.length - 1 - i)) + '日')));
+      })()),
       h('h3', { className: 'cd-h' }, '稼ぎ頭の機体'),
       top.length === 0 ? h('p', { className: 'sub' }, 'まだ機体がありません') : top.map((p) => h('div', { className: 'cd-bar', key: p.id },
         h('span', null, TYPE[p.type].name + ' #' + p.id), h('i', null, h('u', { style: { width: Math.max(3, p.profit / topMax * 100) + '%' } })), h('b', null, fmt(p.profit)))),
@@ -1722,6 +1761,7 @@ function App() {
       h(MapView, { g, ui, view, setView, onTap: tapAirport }),
       h('div', { className: 'ov left' },
         h('div', { className: 'seg', role: 'group', 'aria-label': '速度' }, [1, 2, 10].map((v) => h('button', { key: v, className: g.speed === v ? 'on' : '', onClick: () => ENG.setSpeed(v) }, v + '×'))),
+        h('div', { className: 'pill clock' }, h('span', null, '⏱ ゲーム内時刻'), h('b', null, ENG.clockText(g))),
         h('div', { className: 'pill' }, h('span', null, active + '/' + g.planes.length + '機 運航'), h('b', { className: rate < 0 ? 'neg' : '' }, fmt(rate) + '/分'))),
       h('div', { className: 'ov right' },
         h('button', { className: 'iconbtn', onClick: () => setUi({ tab: uiRef.current.tab === 'search' ? null : 'search', sel: null }), 'aria-label': '空港を検索' }, icon('search')),
